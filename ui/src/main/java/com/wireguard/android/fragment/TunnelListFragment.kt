@@ -22,6 +22,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.view.ActionMode
 import androidx.lifecycle.lifecycleScope
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.snackbar.Snackbar
 import com.google.zxing.qrcode.QRCodeReader
 import com.journeyapps.barcodescanner.ScanContract
@@ -32,6 +33,7 @@ import com.wireguard.android.activity.TunnelCreatorActivity
 import com.wireguard.android.databinding.ObservableKeyedRecyclerViewAdapter.RowConfigurationHandler
 import com.wireguard.android.databinding.TunnelListFragmentBinding
 import com.wireguard.android.databinding.TunnelListItemBinding
+import com.wireguard.android.databinding.LinkImportDialogFragmentBinding
 import com.wireguard.android.model.ObservableTunnel
 import com.wireguard.android.updater.SnackbarUpdateShower
 import com.wireguard.android.util.ErrorMessages
@@ -42,6 +44,12 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
 
 /**
  * Fragment containing a list of known WireGuard tunnels. It allows creating and deleting tunnels.
@@ -121,6 +129,10 @@ class TunnelListFragment : BaseFragment() {
                                     .setBeepEnabled(false)
                                     .setPrompt(getString(R.string.qr_code_hint))
                             )
+                        }
+
+                        AddTunnelsSheet.REQUEST_LINK -> {
+                            showImportFromLinkDialog()
                         }
                     }
                 }
@@ -202,6 +214,44 @@ class TunnelListFragment : BaseFragment() {
                 .show()
         else
             Toast.makeText(activity ?: Application.get(), message, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun showImportFromLinkDialog() {
+        val activity = activity ?: return
+        val binding = LinkImportDialogFragmentBinding.inflate(activity.layoutInflater, null, false)
+        MaterialAlertDialogBuilder(activity)
+            .setTitle(R.string.import_from_link)
+            .setView(binding.root)
+            .setNegativeButton(R.string.cancel, null)
+            .setPositiveButton(R.string.connect) { _, _ ->
+                val url = binding.linkText.text?.toString()?.trim() ?: ""
+                if (url.isEmpty()) return@setPositiveButton
+                activity.lifecycleScope.launch {
+                    try {
+                        val config = fetchConfigFromUrl(url)
+                        TunnelImporter.importTunnel(parentFragmentManager, config) { showSnackbar(it) }
+                    } catch (e: Exception) {
+                        showSnackbar(getString(R.string.fetch_config_error, e.message))
+                    }
+                }
+            }
+            .show()
+    }
+
+    private suspend fun fetchConfigFromUrl(urlString: String): String = withContext(Dispatchers.IO) {
+        val connection = URL(urlString).openConnection() as HttpURLConnection
+        connection.connectTimeout = 15000
+        connection.readTimeout = 15000
+        try {
+            if (connection.responseCode != HttpURLConnection.HTTP_OK) {
+                throw IOException("HTTP ${'$'}{connection.responseCode}")
+            }
+            val response = connection.inputStream.bufferedReader().use { it.readText() }
+            val json = JSONObject(response)
+            json.getString("config")
+        } finally {
+            connection.disconnect()
+        }
     }
 
     private fun viewForTunnel(tunnel: ObservableTunnel, tunnels: List<*>): MultiselectableRelativeLayout? {
