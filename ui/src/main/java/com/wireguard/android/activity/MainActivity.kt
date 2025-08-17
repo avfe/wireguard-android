@@ -9,16 +9,26 @@ import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
 import android.view.View
+import android.util.Base64
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.addCallback
 import androidx.appcompat.app.ActionBar
 import androidx.fragment.app.FragmentManager
 import androidx.fragment.app.FragmentTransaction
 import androidx.fragment.app.commit
+import com.google.android.material.snackbar.Snackbar
 import com.wireguard.android.R
 import com.wireguard.android.fragment.TunnelDetailFragment
 import com.wireguard.android.fragment.TunnelEditorFragment
 import com.wireguard.android.model.ObservableTunnel
+import com.wireguard.android.util.TunnelImporter
+import com.wireguard.android.util.applicationScope
+import java.nio.charset.StandardCharsets
+import java.net.URL
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
 /**
  * CRUD interface for WireGuard tunnels. This activity serves as the main entry point to the
@@ -63,11 +73,57 @@ class MainActivity : BaseActivity(), FragmentManager.OnBackStackChangedListener 
         supportFragmentManager.addOnBackStackChangedListener(this)
         backPressedCallback = onBackPressedDispatcher.addCallback(this) { handleBackPressed() }
         onBackStackChanged()
+        handleIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleIntent(intent)
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
         menuInflater.inflate(R.menu.main_activity, menu)
         return true
+    }
+
+    private fun handleIntent(intent: Intent) {
+        if (intent.action != Intent.ACTION_VIEW) return
+        val data = intent.data
+        val encoded = intent.getStringExtra("config")
+            ?: data?.fragment
+            ?: data?.schemeSpecificPart?.removePrefix("//")
+        if (encoded.isNullOrBlank()) return
+        applicationScope.launch(Dispatchers.IO) {
+            val configText = decodeBase64(encoded) ?: fetchConfigFromUrl(encoded) ?: return@launch
+            withContext(Dispatchers.Main) {
+                TunnelImporter.importTunnel(supportFragmentManager, configText) {
+                    Snackbar.make(findViewById(R.id.main_activity_container), it, Snackbar.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    private fun decodeBase64(data: String): String? {
+        val decoded = try {
+            Base64.decode(data, Base64.URL_SAFE or Base64.NO_WRAP)
+        } catch (_: IllegalArgumentException) {
+            try {
+                Base64.decode(data, Base64.NO_WRAP)
+            } catch (_: IllegalArgumentException) {
+                return null
+            }
+        }
+        return String(decoded, StandardCharsets.UTF_8)
+    }
+
+    private fun fetchConfigFromUrl(spec: String): String? {
+        return try {
+            val json = URL(spec).openStream().bufferedReader().use { it.readText() }
+            val config = JSONObject(json).optString("config")
+            if (config.isBlank()) null else config
+        } catch (_: Exception) {
+            null
+        }
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
